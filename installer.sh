@@ -13,16 +13,27 @@ set -e
 USER_NAME="${SUDO_USER:-$(whoami)}"
 USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 
+# Проверка, что скрипт запущен через sudo
+if [ "$EUID" -ne 0 ]; then
+  echo "Пожалуйста, запустите этот скрипт с правами root через sudo."
+  exit 1
+fi
+if [ -z "$SUDO_USER" ]; then
+    echo "ПРЕДУПРЕЖДЕНИЕ: Не удалось определить пользователя. Некоторые пользовательские настройки могут быть пропущены."
+    USER_NAME="root"
+fi
+
+
 echo "=== 1. ОБНОВЛЕНИЕ ЗЕРКАЛ И УСТАНОВКА ДОПОЛНИТЕЛЬНЫХ СЕРВИСОВ ==="
 
 # 1.1. Обновление зеркал CachyOS (требуется sudo)
-echo "Запуск: sudo cachy-os-range-mirrors"
-sudo cachy-os-range-mirrors
+echo "Запуск: sudo cachyos-rate-mirrors"
+cachyos-rate-mirrors
 
 # 1.2. Установка git (если не установлен), необходимого для клонирования
 if ! command -v git &> /dev/null; then
     echo "Git не найден. Установка Git..."
-    sudo pacman -S --noconfirm git
+    pacman -S --noconfirm git
 fi
 
 # 1.3. Установка и запуск сервиса из репозитория
@@ -32,13 +43,13 @@ echo "Клонирование и запуск zapret-discord-youtube-linux..."
 CLONE_DIR="/tmp/zapret-discord-youtube-linux"
 if [ -d "$CLONE_DIR" ]; then
     echo "Директория $CLONE_DIR уже существует. Удаляем старую."
-    sudo rm -rf "$CLONE_DIR"
+    rm -rf "$CLONE_DIR"
 fi
 
 git clone https://github.com/Sergeydigl3/zapret-discord-youtube-linux.git "$CLONE_DIR"
 cd "$CLONE_DIR"
 echo "Запуск установочного скрипта..."
-sudo bash service.sh
+bash service.sh
 
 # Возвращаемся в исходный каталог
 cd - > /dev/null
@@ -47,7 +58,7 @@ echo "-----------------------------------------------------"
 
 # 1.4. Синхронизация и обновление системы
 echo "Синхронизация и обновление пакетов: sudo pacman -Syu"
-sudo pacman -Syu --noconfirm
+pacman -Syu --noconfirm
 
 echo "====================================================="
 echo "=== 2. УСТАНОВКА YAY (AUR HELPER) ==="
@@ -55,30 +66,39 @@ echo "=== 2. УСТАНОВКА YAY (AUR HELPER) ==="
 if ! command -v yay &> /dev/null; then
     echo "yay не найден. Установка..."
 
-    # Установка go, необходимого для сборки yay
-    sudo pacman -S --noconfirm go
+    # Установка зависимостей для сборки
+    pacman -S --noconfirm --needed git base-devel
 
-    # Клонирование и сборка yay
+    # Клонирование репозитория yay во временную директорию
+    # Владельцем становится обычный пользователь, чтобы makepkg работал
     git clone https://aur.archlinux.org/yay.git /tmp/yay-install
+    chown -R "$USER_NAME":"$USER_NAME" /tmp/yay-install
     cd /tmp/yay-install
-    makepkg -si --noconfirm
+
+    # Сборка и установка от имени пользователя
+    # makepkg не должен запускаться от root
+    echo "Запуск makepkg от имени пользователя $USER_NAME..."
+    sudo -u "$USER_NAME" makepkg -si --noconfirm
+
+    # Очистка
     cd - > /dev/null
     rm -rf /tmp/yay-install
 else
     echo "yay уже установлен. Пропускаем."
 fi
 
+
 echo "====================================================="
 echo "=== 3. УСТАНОВКА ОСНОВНЫХ ПАКЕТОВ (pacman и yay) ==="
 
 # 3.1. Установка пакетов через pacman (официальные репозитории)
-echo "Установка Discord, Steam, WPS Office, CUPS, Node.js, pnpm, PHP и Composer через pacman..."
-# Установлены nodejs, pnpm (менеджер пакетов), php и composer (для Laravel)
-sudo pacman -S --noconfirm discord steam wps-office cups nodejs pnpm php composer
+echo "Установка Discord, Steam, WPS Office, CUPS, Node.js, pnpm, PHP, PHP-SQLite и Composer через pacman..."
+# Установлены nodejs, pnpm (менеджер пакетов), php, php-sqlite и composer (для Laravel)
+pacman -S --noconfirm discord steam wps-office cups nodejs pnpm php php-sqlite composer
 
-# 3.2. Установка пакетов через yay (AUR)
+# 3.2. Установка пакетов через yay (AUR) от имени пользователя
 echo "Установка Hiddify и Visual Studio Code (code) через yay..."
-yay -S --noconfirm hiddify visual-studio-code-bin
+sudo -u "$USER_NAME" yay -S --noconfirm hiddify visual-studio-code-bin
 
 echo "-----------------------------------------------------"
 
@@ -103,12 +123,12 @@ echo "Настройка YouTube Music AppImage..."
 if [ "$USER_NAME" != "root" ]; then
     TARGET_DIR="$USER_HOME/.local/share/applications"
     TARGET_PATH="$TARGET_DIR/YTMusic.AppImage"
-    DOWNLOAD_URL="https://github.com/pear-devs/pear-desktop/releases/download/v3.11.0/YouTube-Music-3.11.0-arm64.AppImage"
+    DOWNLOAD_URL="https://github.com/th-ch/youtube-music/releases/download/v2.2.1/youtube-music-2.2.1.AppImage" # Обновленная ссылка
 
     # Устанавливаем curl, если не установлен
     if ! command -v curl &> /dev/null; then
         echo "Установка curl для загрузки файла..."
-        sudo pacman -S --noconfirm curl
+        pacman -S --noconfirm curl
     fi
 
     echo "Создание целевой директории: $TARGET_DIR"
@@ -120,19 +140,20 @@ if [ "$USER_NAME" != "root" ]; then
 
     echo "Копирование AppImage в $TARGET_PATH и установка прав..."
     # Копирование и смена владельца
-    sudo cp /tmp/YTMusic.AppImage "$TARGET_PATH"
-    sudo chown "$USER_NAME":"$USER_NAME" "$TARGET_PATH"
+    cp /tmp/YTMusic.AppImage "$TARGET_PATH"
+    chown "$USER_NAME":"$USER_NAME" "$TARGET_PATH"
 
     # Установка прав +x от имени пользователя
     sudo -u "$USER_NAME" chmod +x "$TARGET_PATH"
 
     # Удаление временного файла
-    sudo rm /tmp/YTMusic.AppImage
+    rm /tmp/YTMusic.AppImage
 
     echo "YouTube Music AppImage установлен и готов к запуску."
 else
     echo "ПРЕДУПРЕЖДЕНИЕ: Установка AppImage пропущена, так как скрипт был запущен напрямую от 'root'."
 fi
+
 
 echo "====================================================="
 echo "=== 4. НАСТРОЙКА HIDDIFY LAUNCHER С ПРАВАМИ ROOT ==="
@@ -141,7 +162,7 @@ echo "=== 4. НАСТРОЙКА HIDDIFY LAUNCHER С ПРАВАМИ ROOT ==="
 LAUNCHER_PATH="/usr/local/bin/hiddify-launcher.sh"
 echo "Создание скрипта: $LAUNCHER_PATH"
 
-sudo tee "$LAUNCHER_PATH" > /dev/null << EOF
+tee "$LAUNCHER_PATH" > /dev/null << EOF
 #!/bin/bash
 # Самый надежный скрипт для запуска GUI с правами root в Hyprland через pkexec.
 
@@ -163,18 +184,19 @@ pkexec env \$ENV_VARS "\$HIDDIFY_PATH"
 EOF
 
 # Делаем скрипт исполняемым
-sudo chmod +x "$LAUNCHER_PATH"
+chmod +x "$LAUNCHER_PATH"
 
 # 4.2. Создание .desktop файла для меню приложений
-DESKTOP_ENTRY_DIR="$USER_HOME/.local/share/applications"
-DESKTOP_ENTRY_PATH="$DESKTOP_ENTRY_DIR/hiddify-root.desktop"
-echo "Создание ярлыка: $DESKTOP_ENTRY_PATH"
+if [ "$USER_NAME" != "root" ]; then
+    DESKTOP_ENTRY_DIR="$USER_HOME/.local/share/applications"
+    DESKTOP_ENTRY_PATH="$DESKTOP_ENTRY_DIR/hiddify-root.desktop"
+    echo "Создание ярлыка: $DESKTOP_ENTRY_PATH"
 
-# Обеспечиваем, что директория существует и имеет права пользователя
-sudo -u "$USER_NAME" mkdir -p "$DESKTOP_ENTRY_DIR"
+    # Обеспечиваем, что директория существует и имеет права пользователя
+    sudo -u "$USER_NAME" mkdir -p "$DESKTOP_ENTRY_DIR"
 
-# Используем tee от имени пользователя
-sudo -u "$USER_NAME" tee "$DESKTOP_ENTRY_PATH" > /dev/null << EOF
+    # Используем tee от имени пользователя
+    sudo -u "$USER_NAME" tee "$DESKTOP_ENTRY_PATH" > /dev/null << EOF
 [Desktop Entry]
 Name=Hiddify (Root)
 Comment=Hiddify Client launched with root privileges
@@ -186,11 +208,50 @@ Categories=Network;Utility;VPN;
 Keywords=vpn;proxy;hiddify;root;
 EOF
 
-# Обновление базы данных .desktop файлов
-update-desktop-database "$DESKTOP_ENTRY_DIR"
+    # Обновление базы данных .desktop файлов
+    update-desktop-database "$DESKTOP_ENTRY_DIR"
+fi
+
 
 echo "====================================================="
-echo "=== 5. ЗАВЕРШЕНИЕ ==="
+echo "=== 5. УСТАНОВКА ILLOGICAL IMPULSE (ОПЦИОНАЛЬНО) ==="
+
+read -p "Хотите установить Illogical Impulse? (y/n): " choice
+case "$choice" in
+  y|Y )
+    echo "Установка Illogical Impulse..."
+    # Установка curl, если он еще не установлен
+    if ! command -v curl &> /dev/null; then
+        pacman -S --noconfirm curl
+    fi
+    # Скачивание и запуск установщика
+    II_SETUP_SCRIPT="/tmp/ii_setup.sh"
+    curl -sL "https://ii.clsty.link/setup" -o "$II_SETUP_SCRIPT"
+    chmod +x "$II_SETUP_SCRIPT"
+    "$II_SETUP_SCRIPT"
+
+    # Очистка
+    rm "$II_SETUP_SCRIPT"
+    echo "Illogical Impulse установлен."
+    echo "Запуск приложения..."
+    # Запуск от имени пользователя в фоновом режиме
+    if [ "$USER_NAME" != "root" ]; then
+        sudo -u "$USER_NAME" illogical-impulse &
+    else
+        illogical-impulse &
+    fi
+    ;;
+  n|N )
+    echo "Установка Illogical Impulse пропущена."
+    ;;
+  * )
+    echo "Неверный ввод. Установка Illogical Impulse пропущена."
+    ;;
+esac
+
+
+echo "====================================================="
+echo "=== 6. ЗАВЕРШЕНИЕ ==="
 echo "✅ Установка и настройка завершены."
 echo "✅ Для использования Hiddify от имени root ищите 'Hiddify (Root)' в меню приложений."
 echo "✅ Для использования CUPS необходимо включить и запустить сервис: sudo systemctl enable --now cups.service"
